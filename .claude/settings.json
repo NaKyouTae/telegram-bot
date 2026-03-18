@@ -79,7 +79,9 @@
       "Bash(curl -s \"https://api.bybit.com/v5/announcements/index?locale=en-US&limit=1&page=2\")",
       "Bash(curl -s -D- \"https://api.bybit.com/v5/announcements/index?locale=en-US&limit=1\")",
       "Bash(curl -s -H \"User-Agent: Mozilla/5.0\" \"https://coinone.co.kr/api/talk/notice/?page=1&board_category=3\")",
-      "Bash(curl -s -H \"User-Agent: Mozilla/5.0\" \"https://coinone.co.kr/api/talk/notice/?page=1&category=3\")"
+      "Bash(curl -s -H \"User-Agent: Mozilla/5.0\" \"https://coinone.co.kr/api/talk/notice/?page=1&category=3\")",
+      "Bash(curl -s \"https://api.telegram.org/bot7784266051:AAFKx4FDQ5aCUzsWsG5so_5ALLovmdnWX5M/getUpdates\")",
+      "Bash(curl -s \"https://api.telegram.org/bot7784266051:AAFKx4FDQ5aCUzsWsG5so_5ALLovmdnWX5M/getChat?chat_id=@coin_scouter\")"
     ],
     "additionalDirectories": [
       "/Users/nakyutae/personal/git/telegram-bot"
