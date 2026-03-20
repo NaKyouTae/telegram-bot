@@ -19,6 +19,9 @@ export class GridUser {
   @Column({ default: false })
   isAdmin: boolean;
 
+  @Column({ default: 'pending' })
+  status: 'pending' | 'approved';
+
   @Column({ nullable: true })
   encryptedApiKey: string;
 

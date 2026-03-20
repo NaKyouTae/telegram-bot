@@ -95,7 +95,8 @@
       "Bash(curl -s \"https://api.pacifica.fi/api/v1/info\")",
       "Bash(curl -s \"https://api.pacifica.fi/api/v1/orders?account=test\")",
       "Bash(grep -E \"\\\\.\\(ts|json\\)$\")",
-      "Bash(wc -l /Users/nakyutae/personal/git/telegram-bot/src/*/*.service.ts)"
+      "Bash(wc -l /Users/nakyutae/personal/git/telegram-bot/src/*/*.service.ts)",
+      "Bash(node -e \"console.log\\(require\\(''crypto''\\).randomBytes\\(32\\).toString\\(''hex''\\)\\)\")"
     ],
     "additionalDirectories": [
       "/Users/nakyutae/personal/git/telegram-bot"

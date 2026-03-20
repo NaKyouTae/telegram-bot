@@ -37,19 +37,16 @@ export class TelegramService implements OnModuleInit {
     this.bot.command('start', (ctx: Context) => {
       ctx.reply(
         `봇이 활성화되었습니다.\n\n` +
-          '📋 공지사항 조회 명령어:\n' +
-          '/upbitnotice - 업비트\n' +
-          '/bithumbnotice - 빗썸\n' +
-          '/binancenotice - 바이낸스\n' +
-          '/okxnotice - OKX\n' +
-          '/coinonenotice - 코인원\n' +
-          '/bitgetnotice - 비트겟\n' +
-          '/bybitnotice - 바이비트\n' +
-          '/coinbasenotice - 코인베이스\n\n' +
-          '🔔 실시간 알림:\n' +
-          '8개 거래소의 신규 공지가 올라오면 자동으로 알림을 보내드립니다.\n\n' +
-          '📊 그리드 매매:\n' +
-          '/grid - 그리드 자동 매매 (Pacifica)',
+          '📌 일반\n' +
+          '/join - 가입 요청\n' +
+          '/setkey - API 키 등록\n' +
+          '/balance - 잔고 조회\n' +
+          '/price - 현재가 조회\n\n' +
+          '📈 매매\n' +
+          '/trade - 그리드 매매 시작\n' +
+          '/stoptrade - 그리드 매매 중지\n' +
+          '/status - 매매 상태 조회\n\n' +
+          '/help - 전체 명령어 보기',
       );
     });
 
@@ -77,6 +74,13 @@ export class TelegramService implements OnModuleInit {
   async sendMessageTo(chatId: number | string, text: string) {
     await this.bot.telegram.sendMessage(chatId, text, {
       parse_mode: 'HTML',
+    });
+  }
+
+  async sendMessageWithButtons(chatId: number | string, text: string, markup: any) {
+    await this.bot.telegram.sendMessage(chatId, text, {
+      parse_mode: 'HTML',
+      ...markup,
     });
   }
 }

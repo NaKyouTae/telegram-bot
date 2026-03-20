@@ -9,6 +9,10 @@ import { TelegramService } from '../telegram/telegram.service';
 import { GridUser } from '../database/entities/grid-user.entity';
 import { decrypt } from './crypto.util';
 
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 interface GridConfig {
   symbol: string;
   lowerPrice: number;
@@ -70,6 +74,24 @@ export class GridTradingService {
     return client.getMarketPrice(symbol);
   }
 
+  async getMinOrderSize(symbol: string): Promise<number> {
+    const client = this.pacificaClientFactory.getPublicClient();
+    const markets = await client.getMarkets();
+    const market = markets.find((m) => m.symbol === symbol);
+    return market ? parseFloat(market.min_order_size) : 10;
+  }
+
+  async getAvailableBalance(userId: number): Promise<string | null> {
+    try {
+      const client = await this.getClientForUser(userId);
+      const accountInfo = await client.getAccountInfo();
+      const available = accountInfo.available_to_spend ?? accountInfo.balance ?? '0';
+      return parseFloat(available).toLocaleString();
+    } catch {
+      return null;
+    }
+  }
+
   async getBalance(userId: number): Promise<string> {
     try {
       const client = await this.getClientForUser(userId);
@@ -85,10 +107,113 @@ export class GridTradingService {
       );
     } catch (error) {
       if (error.message === 'KEY_NOT_SET') {
-        return '❌ API 키가 설정되지 않았습니다. /grid setkey <apiKey> <privateKey>로 설정하세요.';
+        return '❌ API 키가 설정되지 않았습니다. /setkey 로 API 키를 등록하세요.';
       }
       const detail = error.response?.data?.error ?? error.message;
-      return `❌ 잔고 조회 실패: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`;
+      return `❌ 잔고 조회 실패: ${escapeHtml(typeof detail === 'string' ? detail : JSON.stringify(detail))}`;
+    }
+  }
+
+  async preview(
+    userId: number,
+    symbol: string,
+    lowerPrice: number,
+    upperPrice: number,
+    gridCount: number,
+    totalAmount: number,
+    leverage: number = 1,
+  ): Promise<string> {
+    if (this.sessions.has(userId)) {
+      return '⚠️ 이미 그리드 매매가 실행 중입니다. 먼저 /stoptrade 로 중지하세요.';
+    }
+
+    let client: PacificaClient;
+    try {
+      client = await this.getClientForUser(userId);
+    } catch (error) {
+      if (error.message === 'KEY_NOT_SET') {
+        return '❌ API 키가 설정되지 않았습니다. /setkey 로 API 키를 등록하세요.';
+      }
+      return `❌ 인증 실패: ${escapeHtml(error.message)}`;
+    }
+
+    if (lowerPrice >= upperPrice) {
+      return '❌ 하한가는 상한가보다 낮아야 합니다.';
+    }
+    if (gridCount < 2 || gridCount > 50) {
+      return '❌ 그리드 수는 2~50 사이여야 합니다.';
+    }
+    if (leverage < 1 || leverage > 50) {
+      return '❌ 레버리지는 1~50 사이여야 합니다.';
+    }
+
+    try {
+      const markets = await client.getMarkets();
+      const marketInfo = markets.find((m) => m.symbol === symbol);
+      if (!marketInfo) {
+        return `❌ ${symbol} 마켓을 찾을 수 없습니다.`;
+      }
+
+      const minOrderSize = parseFloat(marketInfo.min_order_size);
+      const orderCount = gridCount + 1;
+      const amountPerGrid = totalAmount / orderCount;
+      if (amountPerGrid < minOrderSize) {
+        return (
+          `❌ 주문당 금액($${amountPerGrid.toFixed(2)})이 최소 주문금액($${minOrderSize})보다 작습니다.\n\n` +
+          `최소 투자금: $${(minOrderSize * orderCount).toFixed(0)} (${orderCount}건 × $${minOrderSize})`
+        );
+      }
+
+      const accountInfo = await client.getAccountInfo();
+      const available = parseFloat(accountInfo.available_to_spend ?? accountInfo.balance ?? '0');
+      if (available < totalAmount) {
+        return (
+          `❌ 잔고가 부족합니다.\n\n` +
+          `필요 금액: $${totalAmount.toFixed(2)}\n` +
+          `사용 가능: $${available.toFixed(2)}\n` +
+          `부족: $${(totalAmount - available).toFixed(2)}`
+        );
+      }
+
+      const currentPrice = await client.getMarketPrice(symbol);
+      const gridInterval = (upperPrice - lowerPrice) / gridCount;
+      let bidCount = 0;
+      let askCount = 0;
+      for (let i = 0; i <= gridCount; i++) {
+        const price = lowerPrice + gridInterval * i;
+        if (price < currentPrice) bidCount++;
+        else askCount++;
+      }
+
+      let gridDetail = '';
+      for (let i = 0; i <= gridCount; i++) {
+        const price = lowerPrice + gridInterval * i;
+        const side = price < currentPrice ? '🟢 매수' : '🔴 매도';
+        const marker = (price <= currentPrice && price + gridInterval > currentPrice) ? ' ◀ 현재가' : '';
+        gridDetail += `  $${price.toFixed(2)} ${side}${marker}\n`;
+      }
+
+      return (
+        `📋 <b>그리드 매매 확인</b>\n\n` +
+        `종목: <b>${symbol}</b>\n` +
+        `현재가: $${currentPrice.toLocaleString()}\n` +
+        `범위: $${lowerPrice.toLocaleString()} ~ $${upperPrice.toLocaleString()}\n` +
+        `그리드 수: ${gridCount}개\n` +
+        `그리드 간격: $${gridInterval.toFixed(2)}\n` +
+        `매수 주문: ${bidCount}개 (현재가 아래)\n` +
+        `매도 주문: ${askCount}개 (현재가 위)\n` +
+        `주문당 금액: $${amountPerGrid.toFixed(2)}\n` +
+        `총 투자금: $${totalAmount}\n` +
+        `레버리지: ${leverage}x\n` +
+        `사용 가능 잔고: $${available.toFixed(2)}\n\n` +
+        `📊 <b>주문 배치 계획</b>\n` +
+        `<pre>${gridDetail}</pre>\n` +
+        `⚠️ /stoptrade 로 직접 중지해야 종료됩니다.\n` +
+        `가격이 범위를 벗어나도 주문은 유지됩니다.`
+      );
+    } catch (error) {
+      const detail = error.response?.data?.error ?? error.response?.data ?? error.message;
+      return `❌ 미리보기 실패: ${escapeHtml(typeof detail === 'string' ? detail : JSON.stringify(detail))}`;
     }
   }
 
@@ -102,7 +227,7 @@ export class GridTradingService {
     leverage: number = 1,
   ): Promise<string> {
     if (this.sessions.has(userId)) {
-      return '⚠️ 이미 그리드 매매가 실행 중입니다. 먼저 /grid stop으로 중지하세요.';
+      return '⚠️ 이미 그리드 매매가 실행 중입니다. 먼저 /stoptrade 로 중지하세요.';
     }
 
     let client: PacificaClient;
@@ -110,9 +235,9 @@ export class GridTradingService {
       client = await this.getClientForUser(userId);
     } catch (error) {
       if (error.message === 'KEY_NOT_SET') {
-        return '❌ API 키가 설정되지 않았습니다. /grid setkey <apiKey> <privateKey>로 설정하세요.';
+        return '❌ API 키가 설정되지 않았습니다. /setkey 로 API 키를 등록하세요.';
       }
-      return `❌ 인증 실패: ${error.message}`;
+      return `❌ 인증 실패: ${escapeHtml(error.message)}`;
     }
 
     if (lowerPrice >= upperPrice) {
@@ -196,7 +321,7 @@ export class GridTradingService {
     } catch (error) {
       const detail = error.response?.data?.error ?? error.response?.data ?? error.message;
       this.logger.error(`[User ${userId}] Grid start failed: ${JSON.stringify(detail)}`);
-      return `❌ 그리드 시작 실패: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`;
+      return `❌ 그리드 시작 실패: ${escapeHtml(typeof detail === 'string' ? detail : JSON.stringify(detail))}`;
     }
   }
 
@@ -224,7 +349,7 @@ export class GridTradingService {
     } catch (error) {
       const detail = error.response?.data?.error ?? error.message;
       this.logger.error(`[User ${userId}] Grid stop failed: ${detail}`);
-      return `❌ 그리드 중지 실패: ${detail}`;
+      return `❌ 그리드 중지 실패: ${escapeHtml(typeof detail === 'string' ? detail : JSON.stringify(detail))}`;
     }
   }
 
@@ -255,7 +380,7 @@ export class GridTradingService {
       );
     } catch (error) {
       const detail = error.response?.data?.error ?? error.message;
-      return `❌ 상태 조회 실패: ${detail}`;
+      return `❌ 상태 조회 실패: ${escapeHtml(typeof detail === 'string' ? detail : JSON.stringify(detail))}`;
     }
   }
 
@@ -293,7 +418,7 @@ export class GridTradingService {
     client: PacificaClient,
     session: UserGridSession,
   ): Promise<number> {
-    const amountPerGrid = session.config.totalAmount / session.config.gridCount;
+    const amountPerGrid = session.config.totalAmount / (session.config.gridCount + 1);
     const lotSize = session.config.lotSize;
     let failCount = 0;
 
@@ -326,8 +451,20 @@ export class GridTradingService {
     return failCount;
   }
 
+  private isMonitoring = false;
+
   @Cron(CronExpression.EVERY_5_SECONDS)
   async monitorOrders(): Promise<void> {
+    if (this.isMonitoring) return;
+    this.isMonitoring = true;
+    try {
+      await this.doMonitor();
+    } finally {
+      this.isMonitoring = false;
+    }
+  }
+
+  private async doMonitor(): Promise<void> {
     for (const [userId, session] of this.sessions) {
       try {
         const client = await this.getClientForUser(userId);
@@ -337,41 +474,56 @@ export class GridTradingService {
           (session.config.upperPrice - session.config.lowerPrice) /
           session.config.gridCount;
 
-        for (const level of session.gridLevels) {
+        for (let idx = 0; idx < session.gridLevels.length; idx++) {
+          const level = session.gridLevels[idx];
           if (!level.orderId || openOrderIds.has(level.orderId)) continue;
 
-          level.filled = true;
+          // 주문이 사라짐 — 체결로 간주하기 전에 검증
+          // 최근 배치한 주문이 즉시 사라진 경우(ALO 셀프트레이드 취소 등) 무시
+          const oldSide = level.side;
+          const oldOrderId = level.orderId;
+          level.orderId = null;
+
           session.fillCount++;
 
-          const oldSide = level.side;
-          level.side = oldSide === 'bid' ? 'ask' : 'bid';
-          level.orderId = null;
-          level.filled = false;
+          // 반대 주문은 인접 그리드 가격에 배치
+          // 매수 체결 → 한 칸 위에 매도, 매도 체결 → 한 칸 아래에 매수
+          const flipIdx = oldSide === 'bid' ? idx + 1 : idx - 1;
+          const flipLevel = session.gridLevels[flipIdx];
 
-          session.totalProfit += gridInterval * (session.config.totalAmount / session.config.gridCount / level.price);
+          const amountPerGrid = session.config.totalAmount / (session.config.gridCount + 1);
 
-          this.logger.log(
-            `[User ${userId}] Order filled at $${level.price}. Flipping to ${level.side}. Total fills: ${session.fillCount}`,
-          );
+          // 인접 레벨이 존재하고 주문이 없는 경우에만 반대 주문 배치
+          if (flipLevel && !flipLevel.orderId) {
+            const newSide: 'bid' | 'ask' = oldSide === 'bid' ? 'ask' : 'bid';
 
-          try {
-            const amountPerGrid =
-              session.config.totalAmount / session.config.gridCount;
-            const orderAmount = amountPerGrid / level.price;
+            session.totalProfit += gridInterval * (amountPerGrid / level.price);
 
-            const result = await client.createLimitOrder({
-              symbol: session.config.symbol,
-              side: level.side,
-              price: level.price.toString(),
-              amount: this.ceilToLotSize(orderAmount, session.config.lotSize),
-              tif: 'ALO',
-            });
+            this.logger.log(
+              `[User ${userId}] Order ${oldOrderId} filled: ${oldSide} @ $${level.price}. Placing ${newSide} @ $${flipLevel.price}`,
+            );
 
-            level.orderId = result.order_id;
-          } catch (error) {
-            const detail = error.response?.data?.error ?? error.message;
-            this.logger.error(
-              `[User ${userId}] Failed to flip order at $${level.price}: ${detail}`,
+            try {
+              const orderAmount = amountPerGrid / flipLevel.price;
+              const result = await client.createLimitOrder({
+                symbol: session.config.symbol,
+                side: newSide,
+                price: flipLevel.price.toString(),
+                amount: this.ceilToLotSize(orderAmount, session.config.lotSize),
+                tif: 'ALO',
+              });
+
+              flipLevel.side = newSide;
+              flipLevel.orderId = result.order_id;
+            } catch (error) {
+              const detail = error.response?.data?.error ?? error.message;
+              this.logger.error(
+                `[User ${userId}] Failed to place flip order at $${flipLevel.price}: ${detail}`,
+              );
+            }
+          } else {
+            this.logger.log(
+              `[User ${userId}] Order ${oldOrderId} filled: ${oldSide} @ $${level.price}. No adjacent level for flip.`,
             );
           }
 
