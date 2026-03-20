@@ -19,6 +19,12 @@ export class GridUser {
   @Column({ default: false })
   isAdmin: boolean;
 
+  @Column({ nullable: true })
+  encryptedApiKey: string;
+
+  @Column({ nullable: true })
+  encryptedPrivateKey: string;
+
   @CreateDateColumn()
   createdAt: Date;
 }

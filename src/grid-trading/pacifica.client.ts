@@ -1,5 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+import { Logger } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { Keypair } from '@solana/web3.js';
@@ -7,7 +6,7 @@ import bs58 from 'bs58';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const nacl = require('tweetnacl');
 
-interface OrderParams {
+export interface OrderParams {
   symbol: string;
   side: 'bid' | 'ask';
   price: string;
@@ -16,7 +15,7 @@ interface OrderParams {
   reduceOnly?: boolean;
 }
 
-interface MarketInfo {
+export interface MarketInfo {
   symbol: string;
   min_order_size: string;
   tick_size: string;
@@ -24,45 +23,28 @@ interface MarketInfo {
   max_leverage: number;
 }
 
-@Injectable()
 export class PacificaClient {
   private readonly logger = new Logger(PacificaClient.name);
-  private readonly baseUrl: string;
-  private readonly apiKey: string | null = null;
-  private readonly authHeaders: Record<string, string> = {};
   private keypair: Keypair | null = null;
   private account: string | null = null;
+  private apiKey: string | null = null;
+  private authHeaders: Record<string, string> = {};
 
   constructor(
-    private configService: ConfigService,
     private httpService: HttpService,
-  ) {
-    const isTestnet =
-      this.configService.get<string>('PACIFICA_TESTNET') === 'true';
-    this.baseUrl = isTestnet
-      ? 'https://test-api.pacifica.fi/api/v1'
-      : 'https://api.pacifica.fi/api/v1';
+    private baseUrl: string,
+  ) {}
 
-    this.apiKey =
-      this.configService.get<string>('PACIFICA_API_KEY') ?? null;
-    if (this.apiKey) {
-      this.authHeaders['PF-API-KEY'] = this.apiKey;
-      this.logger.log('Pacifica API Key configured');
+  initializeFromKeys(apiKey: string, privateKey: string): void {
+    this.apiKey = apiKey;
+    if (apiKey) {
+      this.authHeaders['PF-API-KEY'] = apiKey;
     }
 
-    const privateKey = this.configService.get<string>(
-      'PACIFICA_PRIVATE_KEY',
-    );
-    if (privateKey) {
-      try {
-        const decoded = bs58.decode(privateKey);
-        this.keypair = Keypair.fromSecretKey(decoded);
-        this.account = this.keypair.publicKey.toBase58();
-        this.logger.log(`Pacifica account: ${this.account}`);
-      } catch (e) {
-        this.logger.error('Invalid PACIFICA_PRIVATE_KEY');
-      }
-    }
+    const decoded = bs58.decode(privateKey);
+    this.keypair = Keypair.fromSecretKey(decoded);
+    this.account = this.keypair.publicKey.toBase58();
+    this.logger.log(`Pacifica account initialized: ${this.account}`);
   }
 
   isConfigured(): boolean {

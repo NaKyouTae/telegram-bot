@@ -1,7 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { PacificaClientFactory } from './pacifica-client.factory';
 import { PacificaClient } from './pacifica.client';
 import { TelegramService } from '../telegram/telegram.service';
+import { GridUser } from '../database/entities/grid-user.entity';
+import { decrypt } from './crypto.util';
 
 interface GridConfig {
   symbol: string;
@@ -20,25 +26,74 @@ interface GridLevel {
   filled: boolean;
 }
 
+interface UserGridSession {
+  config: GridConfig;
+  gridLevels: GridLevel[];
+  fillCount: number;
+  totalProfit: number;
+}
+
 @Injectable()
 export class GridTradingService {
   private readonly logger = new Logger(GridTradingService.name);
-  private config: GridConfig | null = null;
-  private gridLevels: GridLevel[] = [];
-  private isRunning = false;
-  private fillCount = 0;
-  private totalProfit = 0;
+  private sessions = new Map<number, UserGridSession>();
 
   constructor(
-    private pacificaClient: PacificaClient,
+    private pacificaClientFactory: PacificaClientFactory,
     private telegramService: TelegramService,
+    private configService: ConfigService,
+    @InjectRepository(GridUser)
+    private gridUserRepository: Repository<GridUser>,
   ) {}
 
+  private getEncryptionKey(): string {
+    return this.configService.getOrThrow<string>('GRID_ENCRYPTION_KEY');
+  }
+
+  private async getClientForUser(userId: number): Promise<PacificaClient> {
+    const user = await this.gridUserRepository.findOne({
+      where: { telegramId: userId },
+    });
+    if (!user?.encryptedApiKey || !user?.encryptedPrivateKey) {
+      throw new Error('KEY_NOT_SET');
+    }
+
+    const encryptionKey = this.getEncryptionKey();
+    const apiKey = decrypt(user.encryptedApiKey, encryptionKey);
+    const privateKey = decrypt(user.encryptedPrivateKey, encryptionKey);
+
+    return this.pacificaClientFactory.getClient(userId, apiKey, privateKey);
+  }
+
   async getPrice(symbol: string): Promise<number> {
-    return this.pacificaClient.getMarketPrice(symbol);
+    const client = this.pacificaClientFactory.getPublicClient();
+    return client.getMarketPrice(symbol);
+  }
+
+  async getBalance(userId: number): Promise<string> {
+    try {
+      const client = await this.getClientForUser(userId);
+
+      const accountInfo = await client.getAccountInfo();
+      const balance = accountInfo.balance ?? '0';
+      const available = accountInfo.available_to_spend ?? balance;
+
+      return (
+        `💰 <b>잔고 조회</b>\n\n` +
+        `총 잔고: $${parseFloat(balance).toLocaleString()}\n` +
+        `사용 가능: $${parseFloat(available).toLocaleString()}`
+      );
+    } catch (error) {
+      if (error.message === 'KEY_NOT_SET') {
+        return '❌ API 키가 설정되지 않았습니다. /grid setkey <apiKey> <privateKey>로 설정하세요.';
+      }
+      const detail = error.response?.data?.error ?? error.message;
+      return `❌ 잔고 조회 실패: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`;
+    }
   }
 
   async start(
+    userId: number,
     symbol: string,
     lowerPrice: number,
     upperPrice: number,
@@ -46,12 +101,18 @@ export class GridTradingService {
     totalAmount: number,
     leverage: number = 1,
   ): Promise<string> {
-    if (!this.pacificaClient.isConfigured()) {
-      return '❌ PACIFICA_PRIVATE_KEY가 .env에 설정되지 않았습니다.';
+    if (this.sessions.has(userId)) {
+      return '⚠️ 이미 그리드 매매가 실행 중입니다. 먼저 /grid stop으로 중지하세요.';
     }
 
-    if (this.isRunning) {
-      return '⚠️ 이미 그리드 매매가 실행 중입니다. 먼저 /grid stop으로 중지하세요.';
+    let client: PacificaClient;
+    try {
+      client = await this.getClientForUser(userId);
+    } catch (error) {
+      if (error.message === 'KEY_NOT_SET') {
+        return '❌ API 키가 설정되지 않았습니다. /grid setkey <apiKey> <privateKey>로 설정하세요.';
+      }
+      return `❌ 인증 실패: ${error.message}`;
     }
 
     if (lowerPrice >= upperPrice) {
@@ -66,11 +127,8 @@ export class GridTradingService {
       return '❌ 레버리지는 1~50 사이여야 합니다.';
     }
 
-    this.fillCount = 0;
-    this.totalProfit = 0;
-
     try {
-      const markets = await this.pacificaClient.getMarkets();
+      const markets = await client.getMarkets();
       const marketInfo = markets.find((m) => m.symbol === symbol);
       if (!marketInfo) {
         return `❌ ${symbol} 마켓을 찾을 수 없습니다.`;
@@ -87,7 +145,7 @@ export class GridTradingService {
         );
       }
 
-      const accountInfo = await this.pacificaClient.getAccountInfo();
+      const accountInfo = await client.getAccountInfo();
       const available = parseFloat(accountInfo.available_to_spend ?? accountInfo.balance ?? '0');
       if (available < totalAmount) {
         return (
@@ -98,32 +156,32 @@ export class GridTradingService {
         );
       }
 
-      this.config = { symbol, lowerPrice, upperPrice, gridCount, totalAmount, leverage, lotSize };
+      const config: GridConfig = { symbol, lowerPrice, upperPrice, gridCount, totalAmount, leverage, lotSize };
 
-      await this.pacificaClient.updateLeverage(symbol, leverage);
-      this.logger.log(`Leverage set to ${leverage}x for ${symbol}`);
+      await client.updateLeverage(symbol, leverage);
+      this.logger.log(`[User ${userId}] Leverage set to ${leverage}x for ${symbol}`);
 
-      const currentPrice = await this.pacificaClient.getMarketPrice(symbol);
-      this.gridLevels = this.buildGridLevels(
-        lowerPrice,
-        upperPrice,
-        gridCount,
-        currentPrice,
-      );
+      const currentPrice = await client.getMarketPrice(symbol);
+      const gridLevels = this.buildGridLevels(lowerPrice, upperPrice, gridCount, currentPrice);
 
-      const failedOrders = await this.placeGridOrders();
-      if (failedOrders === this.gridLevels.length) {
-        this.config = null;
-        this.gridLevels = [];
+      const session: UserGridSession = {
+        config,
+        gridLevels,
+        fillCount: 0,
+        totalProfit: 0,
+      };
+
+      const failedOrders = await this.placeGridOrders(client, session);
+      if (failedOrders === gridLevels.length) {
         return '❌ 모든 주문이 실패했습니다. 설정을 확인하세요.';
       }
 
-      this.isRunning = true;
+      this.sessions.set(userId, session);
 
       const gridInterval = (upperPrice - lowerPrice) / gridCount;
-      const placedOrders = this.gridLevels.filter((l) => l.orderId !== null).length;
+      const placedOrders = gridLevels.filter((l) => l.orderId !== null).length;
 
-      const message =
+      return (
         `🟢 <b>그리드 매매 시작</b>\n\n` +
         `종목: ${symbol}\n` +
         `범위: $${lowerPrice.toLocaleString()} ~ $${upperPrice.toLocaleString()}\n` +
@@ -133,70 +191,67 @@ export class GridTradingService {
         `주문당 금액: $${amountPerGrid.toFixed(2)}\n` +
         `총 투자금: $${totalAmount}\n` +
         `레버리지: ${leverage}x\n` +
-        `배치된 주문: ${placedOrders}/${this.gridLevels.length}개`;
-
-      return message;
+        `배치된 주문: ${placedOrders}/${gridLevels.length}개`
+      );
     } catch (error) {
-      this.isRunning = false;
       const detail = error.response?.data?.error ?? error.response?.data ?? error.message;
-      this.logger.error(`Grid start failed: ${JSON.stringify(detail)}`);
+      this.logger.error(`[User ${userId}] Grid start failed: ${JSON.stringify(detail)}`);
       return `❌ 그리드 시작 실패: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`;
     }
   }
 
-  async stop(): Promise<string> {
-    if (!this.isRunning || !this.config) {
+  async stop(userId: number): Promise<string> {
+    const session = this.sessions.get(userId);
+    if (!session) {
       return '⚠️ 실행 중인 그리드 매매가 없습니다.';
     }
 
     try {
-      const result = await this.pacificaClient.cancelAllOrders(
-        this.config.symbol,
-      );
+      const client = await this.getClientForUser(userId);
+      const result = await client.cancelAllOrders(session.config.symbol);
 
       const message =
         `🔴 <b>그리드 매매 중지</b>\n\n` +
-        `종목: ${this.config.symbol}\n` +
+        `종목: ${session.config.symbol}\n` +
         `취소된 주문: ${result.cancelled_count}개\n` +
-        `총 체결 횟수: ${this.fillCount}회\n` +
-        `예상 수익: $${this.totalProfit.toFixed(2)}`;
+        `총 체결 횟수: ${session.fillCount}회\n` +
+        `예상 수익: $${session.totalProfit.toFixed(2)}`;
 
-      this.isRunning = false;
-      this.config = null;
-      this.gridLevels = [];
+      this.sessions.delete(userId);
+      this.pacificaClientFactory.removeClient(userId);
 
       return message;
     } catch (error) {
       const detail = error.response?.data?.error ?? error.message;
-      this.logger.error(`Grid stop failed: ${detail}`);
+      this.logger.error(`[User ${userId}] Grid stop failed: ${detail}`);
       return `❌ 그리드 중지 실패: ${detail}`;
     }
   }
 
-  async getStatus(): Promise<string> {
-    if (!this.isRunning || !this.config) {
+  async getStatus(userId: number): Promise<string> {
+    const session = this.sessions.get(userId);
+    if (!session) {
       return '⚠️ 실행 중인 그리드 매매가 없습니다.';
     }
 
     try {
-      const currentPrice = await this.pacificaClient.getMarketPrice(
-        this.config.symbol,
-      );
-      const openOrders = await this.pacificaClient.getOpenOrders();
+      const client = await this.getClientForUser(userId);
+      const currentPrice = await client.getMarketPrice(session.config.symbol);
+      const openOrders = await client.getOpenOrders();
       const gridOrders = openOrders.filter(
-        (o) => o.symbol === this.config!.symbol,
+        (o) => o.symbol === session.config.symbol,
       );
       const bidOrders = gridOrders.filter((o) => o.side === 'bid').length;
       const askOrders = gridOrders.filter((o) => o.side === 'ask').length;
 
       return (
         `📊 <b>그리드 매매 상태</b>\n\n` +
-        `종목: ${this.config.symbol}\n` +
-        `범위: $${this.config.lowerPrice.toLocaleString()} ~ $${this.config.upperPrice.toLocaleString()}\n` +
+        `종목: ${session.config.symbol}\n` +
+        `범위: $${session.config.lowerPrice.toLocaleString()} ~ $${session.config.upperPrice.toLocaleString()}\n` +
         `현재가: $${currentPrice.toLocaleString()}\n` +
         `활성 주문: ${gridOrders.length}개 (매수 ${bidOrders} / 매도 ${askOrders})\n` +
-        `체결 횟수: ${this.fillCount}회\n` +
-        `예상 수익: $${this.totalProfit.toFixed(2)}`
+        `체결 횟수: ${session.fillCount}회\n` +
+        `예상 수익: $${session.totalProfit.toFixed(2)}`
       );
     } catch (error) {
       const detail = error.response?.data?.error ?? error.message;
@@ -234,19 +289,21 @@ export class GridTradingService {
     return ceiled.toFixed(decimals);
   }
 
-  private async placeGridOrders(): Promise<number> {
-    const amountPerGrid =
-      this.config!.totalAmount / this.config!.gridCount;
-    const lotSize = this.config!.lotSize;
+  private async placeGridOrders(
+    client: PacificaClient,
+    session: UserGridSession,
+  ): Promise<number> {
+    const amountPerGrid = session.config.totalAmount / session.config.gridCount;
+    const lotSize = session.config.lotSize;
     let failCount = 0;
 
-    for (const level of this.gridLevels) {
+    for (const level of session.gridLevels) {
       if (level.filled) continue;
 
       try {
         const orderAmount = amountPerGrid / level.price;
-        const result = await this.pacificaClient.createLimitOrder({
-          symbol: this.config!.symbol,
+        const result = await client.createLimitOrder({
+          symbol: session.config.symbol,
           side: level.side,
           price: level.price.toString(),
           amount: this.ceilToLotSize(orderAmount, lotSize),
@@ -255,7 +312,7 @@ export class GridTradingService {
 
         level.orderId = result.order_id;
         this.logger.log(
-          `Order placed: ${level.side} ${this.config!.symbol} @ $${level.price} (ID: ${result.order_id})`,
+          `Order placed: ${level.side} ${session.config.symbol} @ $${level.price} (ID: ${result.order_id})`,
         );
       } catch (error) {
         failCount++;
@@ -271,65 +328,69 @@ export class GridTradingService {
 
   @Cron(CronExpression.EVERY_5_SECONDS)
   async monitorOrders(): Promise<void> {
-    if (!this.isRunning || !this.config) return;
+    for (const [userId, session] of this.sessions) {
+      try {
+        const client = await this.getClientForUser(userId);
+        const openOrders = await client.getOpenOrders();
+        const openOrderIds = new Set(openOrders.map((o) => o.order_id));
+        const gridInterval =
+          (session.config.upperPrice - session.config.lowerPrice) /
+          session.config.gridCount;
 
-    try {
-      const openOrders = await this.pacificaClient.getOpenOrders();
-      const openOrderIds = new Set(openOrders.map((o) => o.order_id));
-      const gridInterval =
-        (this.config.upperPrice - this.config.lowerPrice) /
-        this.config.gridCount;
+        for (const level of session.gridLevels) {
+          if (!level.orderId || openOrderIds.has(level.orderId)) continue;
 
-      for (const level of this.gridLevels) {
-        if (!level.orderId || openOrderIds.has(level.orderId)) continue;
+          level.filled = true;
+          session.fillCount++;
 
-        // 주문이 체결됨
-        level.filled = true;
-        this.fillCount++;
+          const oldSide = level.side;
+          level.side = oldSide === 'bid' ? 'ask' : 'bid';
+          level.orderId = null;
+          level.filled = false;
 
-        const oldSide = level.side;
-        level.side = oldSide === 'bid' ? 'ask' : 'bid';
-        level.orderId = null;
-        level.filled = false;
+          session.totalProfit += gridInterval * (session.config.totalAmount / session.config.gridCount / level.price);
 
-        this.totalProfit += gridInterval * (this.config.totalAmount / this.config.gridCount / level.price);
-
-        this.logger.log(
-          `Order filled at $${level.price}. Flipping to ${level.side}. Total fills: ${this.fillCount}`,
-        );
-
-        // 반대 주문 배치
-        try {
-          const amountPerGrid =
-            this.config.totalAmount / this.config.gridCount;
-          const orderAmount = amountPerGrid / level.price;
-
-          const result = await this.pacificaClient.createLimitOrder({
-            symbol: this.config.symbol,
-            side: level.side,
-            price: level.price.toString(),
-            amount: this.ceilToLotSize(orderAmount, this.config.lotSize),
-            tif: 'ALO',
-          });
-
-          level.orderId = result.order_id;
-        } catch (error) {
-          const detail = error.response?.data?.error ?? error.message;
-          this.logger.error(
-            `Failed to flip order at $${level.price}: ${detail}`,
+          this.logger.log(
+            `[User ${userId}] Order filled at $${level.price}. Flipping to ${level.side}. Total fills: ${session.fillCount}`,
           );
-        }
 
-        await this.telegramService.sendMessage(
-          `🔄 <b>그리드 체결</b>\n\n` +
-            `${oldSide === 'bid' ? '매수' : '매도'} @ $${level.price}\n` +
-            `체결 횟수: ${this.fillCount}회\n` +
-            `예상 누적 수익: $${this.totalProfit.toFixed(2)}`,
-        );
+          try {
+            const amountPerGrid =
+              session.config.totalAmount / session.config.gridCount;
+            const orderAmount = amountPerGrid / level.price;
+
+            const result = await client.createLimitOrder({
+              symbol: session.config.symbol,
+              side: level.side,
+              price: level.price.toString(),
+              amount: this.ceilToLotSize(orderAmount, session.config.lotSize),
+              tif: 'ALO',
+            });
+
+            level.orderId = result.order_id;
+          } catch (error) {
+            const detail = error.response?.data?.error ?? error.message;
+            this.logger.error(
+              `[User ${userId}] Failed to flip order at $${level.price}: ${detail}`,
+            );
+          }
+
+          try {
+            await this.telegramService.sendMessageTo(
+              userId,
+              `🔄 <b>그리드 체결</b>\n\n` +
+                `${oldSide === 'bid' ? '매수' : '매도'} @ $${level.price}\n` +
+                `체결 횟수: ${session.fillCount}회\n` +
+                `예상 누적 수익: $${session.totalProfit.toFixed(2)}`,
+            );
+          } catch (error) {
+            this.logger.error(`[User ${userId}] Failed to send notification: ${error.message}`);
+          }
+        }
+      } catch (error) {
+        const detail = error.response?.data?.error ?? error.message;
+        this.logger.error(`[User ${userId}] Monitor failed: ${detail}`);
       }
-    } catch (error) {
-      const detail = error.response?.data?.error ?? error.message;
-      this.logger.error(`Monitor failed: ${detail}`);
     }
   }
 }

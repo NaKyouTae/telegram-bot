@@ -65,7 +65,7 @@ export class BinanceService implements OnModuleInit {
     });
   }
 
-  @Cron(CronExpression.EVERY_SECOND)
+  @Cron(CronExpression.EVERY_30_SECONDS)
   async monitor() {
     if (this.isMonitoring) return;
     this.isMonitoring = true;

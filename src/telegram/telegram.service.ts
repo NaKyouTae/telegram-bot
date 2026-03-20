@@ -73,4 +73,10 @@ export class TelegramService implements OnModuleInit {
       parse_mode: 'HTML',
     });
   }
+
+  async sendMessageTo(chatId: number | string, text: string) {
+    await this.bot.telegram.sendMessage(chatId, text, {
+      parse_mode: 'HTML',
+    });
+  }
 }

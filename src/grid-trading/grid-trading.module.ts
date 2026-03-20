@@ -3,11 +3,11 @@ import { HttpModule } from '@nestjs/axios';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { GridTradingService } from './grid-trading.service';
 import { GridTradingCommand } from './grid-trading.command';
-import { PacificaClient } from './pacifica.client';
+import { PacificaClientFactory } from './pacifica-client.factory';
 import { GridUser } from '../database/entities/grid-user.entity';
 
 @Module({
   imports: [HttpModule, TypeOrmModule.forFeature([GridUser])],
-  providers: [PacificaClient, GridTradingService, GridTradingCommand],
+  providers: [PacificaClientFactory, GridTradingService, GridTradingCommand],
 })
 export class GridTradingModule {}

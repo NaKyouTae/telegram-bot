@@ -2,9 +2,13 @@ import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { Keypair } from '@solana/web3.js';
+import bs58 from 'bs58';
 import { TelegramService } from '../telegram/telegram.service';
 import { GridTradingService } from './grid-trading.service';
 import { GridUser } from '../database/entities/grid-user.entity';
+import { PacificaClientFactory } from './pacifica-client.factory';
+import { encrypt } from './crypto.util';
 
 @Injectable()
 export class GridTradingCommand implements OnModuleInit {
@@ -15,6 +19,7 @@ export class GridTradingCommand implements OnModuleInit {
     private telegramService: TelegramService,
     private gridTradingService: GridTradingService,
     private configService: ConfigService,
+    private pacificaClientFactory: PacificaClientFactory,
     @InjectRepository(GridUser)
     private gridUserRepository: Repository<GridUser>,
   ) {
@@ -52,6 +57,10 @@ export class GridTradingCommand implements OnModuleInit {
         }
         await ctx.reply(
           '📊 그리드 매매 명령어:\n\n' +
+            '/grid setkey <apiKey> <privateKey>\n' +
+            '  API 키 등록 (DM으로 입력하세요)\n\n' +
+            '/grid balance\n' +
+            '  잔고 조회\n\n' +
             '/grid start <종목> <하한가> <상한가> <그리드수> <투자금> [레버리지]\n' +
             '  예: /grid start BTC 90000 100000 10 1000 3\n' +
             '  레버리지 미입력 시 1x (기본값)\n\n' +
@@ -92,6 +101,16 @@ export class GridTradingCommand implements OnModuleInit {
         return;
       }
 
+      // setkey는 권한 확인 후 처리
+      if (subCommand === 'setkey') {
+        if (!(await this.isAuthorized(userId))) {
+          await ctx.reply('🔒 권한이 없습니다.');
+          return;
+        }
+        await this.handleSetKey(ctx, userId, args.slice(1));
+        return;
+      }
+
       // 일반 명령어 — 권한 확인
       if (!(await this.isAuthorized(userId))) {
         await ctx.reply('🔒 권한이 없습니다.');
@@ -102,14 +121,17 @@ export class GridTradingCommand implements OnModuleInit {
         case 'price':
           await this.handlePrice(ctx, args.slice(1));
           break;
+        case 'balance':
+          await this.handleBalance(ctx, userId);
+          break;
         case 'start':
-          await this.handleStart(ctx, args.slice(1));
+          await this.handleStart(ctx, userId, args.slice(1));
           break;
         case 'stop':
-          await this.handleStop(ctx);
+          await this.handleStop(ctx, userId);
           break;
         case 'status':
-          await this.handleStatus(ctx);
+          await this.handleStatus(ctx, userId);
           break;
         default:
           await ctx.reply(
@@ -119,6 +141,57 @@ export class GridTradingCommand implements OnModuleInit {
     });
 
     this.logger.log('Grid trading commands registered');
+  }
+
+  private async handleSetKey(
+    ctx: any,
+    userId: number,
+    args: string[],
+  ): Promise<void> {
+    if (args.length < 2) {
+      await ctx.reply(
+        '❌ 사용법: /grid setkey <apiKey> <privateKey>\n\n' +
+          '⚠️ 보안을 위해 봇과의 DM에서 입력하세요.',
+      );
+      return;
+    }
+
+    const [apiKey, privateKey] = args;
+
+    // 키 유효성 검증
+    try {
+      const decoded = bs58.decode(privateKey);
+      Keypair.fromSecretKey(decoded);
+    } catch {
+      await ctx.reply('❌ 유효하지 않은 Private Key입니다. Base58 형식의 Solana 키를 입력하세요.');
+      return;
+    }
+
+    try {
+      // 원본 메시지 삭제 (키 노출 방지)
+      await ctx.deleteMessage().catch(() => {});
+
+      const encryptionKey = this.configService.getOrThrow<string>(
+        'GRID_ENCRYPTION_KEY',
+      );
+
+      const encryptedApiKey = encrypt(apiKey, encryptionKey);
+      const encryptedPrivateKey = encrypt(privateKey, encryptionKey);
+
+      await this.gridUserRepository.update(
+        { telegramId: userId },
+        { encryptedApiKey, encryptedPrivateKey },
+      );
+
+      // 캐시된 클라이언트 제거 (새 키로 재생성되도록)
+      this.pacificaClientFactory.removeClient(userId);
+
+      await ctx.reply('✅ API 키가 등록되었습니다. 이제 그리드 매매를 사용할 수 있습니다.');
+      this.logger.log(`User ${userId} set API keys`);
+    } catch (error) {
+      this.logger.error(`SetKey failed for user ${userId}: ${error.message}`);
+      await ctx.reply('❌ 키 등록 실패. 다시 시도해주세요.');
+    }
   }
 
   private async handleInvite(ctx: any, args: string[]): Promise<void> {
@@ -147,7 +220,7 @@ export class GridTradingCommand implements OnModuleInit {
     });
     await this.gridUserRepository.save(user);
 
-    await ctx.reply(`✅ 유저 추가 완료\nID: ${telegramId}`);
+    await ctx.reply(`✅ 유저 추가 완료\nID: ${telegramId}\n\n유저가 /grid setkey 로 API 키를 등록해야 매매가 가능합니다.`);
     this.logger.log(`User invited: ${telegramId}`);
   }
 
@@ -169,6 +242,7 @@ export class GridTradingCommand implements OnModuleInit {
       return;
     }
 
+    this.pacificaClientFactory.removeClient(telegramId);
     await ctx.reply(`✅ 유저 제거 완료\nID: ${telegramId}`);
     this.logger.log(`User kicked: ${telegramId}`);
   }
@@ -185,8 +259,10 @@ export class GridTradingCommand implements OnModuleInit {
 
     const list = users
       .map(
-        (u, i) =>
-          `${i + 1}. ${u.telegramId}${u.username ? ` (@${u.username})` : ''}`,
+        (u, i) => {
+          const keyStatus = u.encryptedPrivateKey ? '🔑' : '⚠️ 키 미등록';
+          return `${i + 1}. ${u.telegramId}${u.username ? ` (@${u.username})` : ''} ${keyStatus}`;
+        },
       )
       .join('\n');
 
@@ -214,7 +290,16 @@ export class GridTradingCommand implements OnModuleInit {
     }
   }
 
-  private async handleStart(ctx: any, args: string[]): Promise<void> {
+  private async handleBalance(ctx: any, userId: number): Promise<void> {
+    const result = await this.gridTradingService.getBalance(userId);
+    await ctx.reply(result, { parse_mode: 'HTML' });
+  }
+
+  private async handleStart(
+    ctx: any,
+    userId: number,
+    args: string[],
+  ): Promise<void> {
     if (args.length === 0) {
       await ctx.reply(
         '❌ 종목을 입력해주세요.\n\n' +
@@ -261,6 +346,7 @@ export class GridTradingCommand implements OnModuleInit {
     }
 
     const result = await this.gridTradingService.start(
+      userId,
       symbol.toUpperCase(),
       lowerPrice,
       upperPrice,
@@ -272,13 +358,13 @@ export class GridTradingCommand implements OnModuleInit {
     await ctx.reply(result, { parse_mode: 'HTML' });
   }
 
-  private async handleStop(ctx: any): Promise<void> {
-    const result = await this.gridTradingService.stop();
+  private async handleStop(ctx: any, userId: number): Promise<void> {
+    const result = await this.gridTradingService.stop(userId);
     await ctx.reply(result, { parse_mode: 'HTML' });
   }
 
-  private async handleStatus(ctx: any): Promise<void> {
-    const result = await this.gridTradingService.getStatus();
+  private async handleStatus(ctx: any, userId: number): Promise<void> {
+    const result = await this.gridTradingService.getStatus(userId);
     await ctx.reply(result, { parse_mode: 'HTML' });
   }
 }
