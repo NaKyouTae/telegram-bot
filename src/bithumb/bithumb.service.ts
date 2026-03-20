@@ -21,6 +21,7 @@ export class BithumbService implements OnModuleInit {
   private readonly logger = new Logger(BithumbService.name);
   private readonly API_URL = 'https://feed-api.bithumb.com/v1/notices';
   private initialized = false;
+  private isMonitoring = false;
 
   constructor(
     private httpService: HttpService,
@@ -65,8 +66,10 @@ export class BithumbService implements OnModuleInit {
     });
   }
 
-  @Cron(CronExpression.EVERY_30_SECONDS)
+  @Cron(CronExpression.EVERY_SECOND)
   async monitor() {
+    if (this.isMonitoring) return;
+    this.isMonitoring = true;
     try {
       const rawNotices = await this.fetchNotices();
 
@@ -112,6 +115,8 @@ export class BithumbService implements OnModuleInit {
       }
     } catch (error) {
       this.logger.error(`Bithumb monitor failed: ${error.message}`);
+    } finally {
+      this.isMonitoring = false;
     }
   }
 

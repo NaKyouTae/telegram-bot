@@ -13,6 +13,7 @@ import { BitgetModule } from './bitget/bitget.module';
 import { BybitModule } from './bybit/bybit.module';
 import { CoinbaseModule } from './coinbase/coinbase.module';
 import { HealthModule } from './health/health.module';
+import { GridTradingModule } from './grid-trading/grid-trading.module';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { HealthModule } from './health/health.module';
     BybitModule,
     CoinbaseModule,
     HealthModule,
+    GridTradingModule,
   ],
 })
 export class AppModule {}

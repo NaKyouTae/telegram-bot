@@ -32,6 +32,7 @@ export class BinanceService implements OnModuleInit {
   private readonly API_URL =
     'https://www.binance.com/bapi/composite/v1/public/cms/article/list/query';
   private initialized = false;
+  private isMonitoring = false;
 
   constructor(
     private httpService: HttpService,
@@ -64,8 +65,10 @@ export class BinanceService implements OnModuleInit {
     });
   }
 
-  @Cron(CronExpression.EVERY_30_SECONDS)
+  @Cron(CronExpression.EVERY_SECOND)
   async monitor() {
+    if (this.isMonitoring) return;
+    this.isMonitoring = true;
     try {
       const articles = await this.fetchNotices();
       for (const article of articles) {
@@ -102,6 +105,8 @@ export class BinanceService implements OnModuleInit {
       }
     } catch (error) {
       this.logger.error(`Binance monitor failed: ${error.message}`);
+    } finally {
+      this.isMonitoring = false;
     }
   }
 

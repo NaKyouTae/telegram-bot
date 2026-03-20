@@ -27,6 +27,7 @@ export class CoinoneService implements OnModuleInit {
   private readonly logger = new Logger(CoinoneService.name);
   private readonly API_URL = 'https://coinone.co.kr/api/talk/notice/';
   private initialized = false;
+  private isMonitoring = false;
 
   constructor(
     private httpService: HttpService,
@@ -59,8 +60,10 @@ export class CoinoneService implements OnModuleInit {
     });
   }
 
-  @Cron(CronExpression.EVERY_30_SECONDS)
+  @Cron(CronExpression.EVERY_SECOND)
   async monitor() {
+    if (this.isMonitoring) return;
+    this.isMonitoring = true;
     try {
       const rawNotices = await this.fetchNotices();
       for (const raw of rawNotices) {
@@ -98,6 +101,8 @@ export class CoinoneService implements OnModuleInit {
       }
     } catch (error) {
       this.logger.error(`Coinone monitor failed: ${error.message}`);
+    } finally {
+      this.isMonitoring = false;
     }
   }
 

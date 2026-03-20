@@ -28,6 +28,7 @@ export class BybitService implements OnModuleInit {
   private readonly logger = new Logger(BybitService.name);
   private readonly API_URL = 'https://api.bybit.com/v5/announcements/index';
   private initialized = false;
+  private isMonitoring = false;
 
   constructor(
     private httpService: HttpService,
@@ -60,8 +61,10 @@ export class BybitService implements OnModuleInit {
     });
   }
 
-  @Cron(CronExpression.EVERY_30_SECONDS)
+  @Cron(CronExpression.EVERY_SECOND)
   async monitor() {
+    if (this.isMonitoring) return;
+    this.isMonitoring = true;
     try {
       const announcements = await this.fetchNotices();
       for (const ann of announcements) {
@@ -98,6 +101,8 @@ export class BybitService implements OnModuleInit {
       }
     } catch (error) {
       this.logger.error(`Bybit monitor failed: ${error.message}`);
+    } finally {
+      this.isMonitoring = false;
     }
   }
 

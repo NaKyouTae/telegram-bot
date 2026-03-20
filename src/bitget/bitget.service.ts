@@ -27,6 +27,7 @@ export class BitgetService implements OnModuleInit {
   private readonly API_URL =
     'https://api.bitget.com/api/v2/public/annoucements';
   private initialized = false;
+  private isMonitoring = false;
 
   constructor(
     private httpService: HttpService,
@@ -59,8 +60,10 @@ export class BitgetService implements OnModuleInit {
     });
   }
 
-  @Cron(CronExpression.EVERY_30_SECONDS)
+  @Cron(CronExpression.EVERY_SECOND)
   async monitor() {
+    if (this.isMonitoring) return;
+    this.isMonitoring = true;
     try {
       const announcements = await this.fetchNotices();
       for (const ann of announcements) {
@@ -97,6 +100,8 @@ export class BitgetService implements OnModuleInit {
       }
     } catch (error) {
       this.logger.error(`Bitget monitor failed: ${error.message}`);
+    } finally {
+      this.isMonitoring = false;
     }
   }
 

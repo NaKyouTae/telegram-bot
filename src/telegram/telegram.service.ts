@@ -47,7 +47,9 @@ export class TelegramService implements OnModuleInit {
           '/bybitnotice - 바이비트\n' +
           '/coinbasenotice - 코인베이스\n\n' +
           '🔔 실시간 알림:\n' +
-          '8개 거래소의 신규 공지가 올라오면 자동으로 알림을 보내드립니다.',
+          '8개 거래소의 신규 공지가 올라오면 자동으로 알림을 보내드립니다.\n\n' +
+          '📊 그리드 매매:\n' +
+          '/grid - 그리드 자동 매매 (Pacifica)',
       );
     });
 

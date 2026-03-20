@@ -32,6 +32,7 @@ export class CoinbaseService implements OnModuleInit {
   private readonly INCIDENTS_URL =
     'https://status.coinbase.com/api/v2/incidents.json';
   private initialized = false;
+  private isMonitoring = false;
 
   constructor(
     private httpService: HttpService,
@@ -75,8 +76,10 @@ export class CoinbaseService implements OnModuleInit {
     });
   }
 
-  @Cron(CronExpression.EVERY_30_SECONDS)
+  @Cron(CronExpression.EVERY_SECOND)
   async monitor() {
+    if (this.isMonitoring) return;
+    this.isMonitoring = true;
     try {
       const incidents = await this.fetchIncidents();
       for (const incident of incidents) {
@@ -123,6 +126,8 @@ export class CoinbaseService implements OnModuleInit {
       }
     } catch (error) {
       this.logger.error(`Coinbase monitor failed: ${error.message}`);
+    } finally {
+      this.isMonitoring = false;
     }
   }
 

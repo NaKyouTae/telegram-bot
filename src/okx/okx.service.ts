@@ -25,6 +25,7 @@ export class OkxService implements OnModuleInit {
   private readonly logger = new Logger(OkxService.name);
   private readonly API_URL = 'https://www.okx.com/api/v5/support/announcements';
   private initialized = false;
+  private isMonitoring = false;
 
   constructor(
     private httpService: HttpService,
@@ -57,8 +58,10 @@ export class OkxService implements OnModuleInit {
     });
   }
 
-  @Cron(CronExpression.EVERY_30_SECONDS)
+  @Cron(CronExpression.EVERY_SECOND)
   async monitor() {
+    if (this.isMonitoring) return;
+    this.isMonitoring = true;
     try {
       const announcements = await this.fetchNotices();
       for (const ann of announcements) {
@@ -95,6 +98,8 @@ export class OkxService implements OnModuleInit {
       }
     } catch (error) {
       this.logger.error(`OKX monitor failed: ${error.message}`);
+    } finally {
+      this.isMonitoring = false;
     }
   }
 

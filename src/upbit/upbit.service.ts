@@ -33,6 +33,7 @@ export class UpbitService implements OnModuleInit {
   private readonly API_URL =
     'https://api-manager.upbit.com/api/v1/announcements';
   private initialized = false;
+  private isMonitoring = false;
 
   constructor(
     private httpService: HttpService,
@@ -77,8 +78,10 @@ export class UpbitService implements OnModuleInit {
     });
   }
 
-  @Cron(CronExpression.EVERY_30_SECONDS)
+  @Cron(CronExpression.EVERY_SECOND)
   async monitor() {
+    if (this.isMonitoring) return;
+    this.isMonitoring = true;
     try {
       const rawNotices = await this.fetchNotices();
 
@@ -124,6 +127,8 @@ export class UpbitService implements OnModuleInit {
       }
     } catch (error) {
       this.logger.error(`Upbit monitor failed: ${error.message}`);
+    } finally {
+      this.isMonitoring = false;
     }
   }
 

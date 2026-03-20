@@ -81,7 +81,21 @@
       "Bash(curl -s -H \"User-Agent: Mozilla/5.0\" \"https://coinone.co.kr/api/talk/notice/?page=1&board_category=3\")",
       "Bash(curl -s -H \"User-Agent: Mozilla/5.0\" \"https://coinone.co.kr/api/talk/notice/?page=1&category=3\")",
       "Bash(curl -s \"https://api.telegram.org/bot7784266051:AAFKx4FDQ5aCUzsWsG5so_5ALLovmdnWX5M/getUpdates\")",
-      "Bash(curl -s \"https://api.telegram.org/bot7784266051:AAFKx4FDQ5aCUzsWsG5so_5ALLovmdnWX5M/getChat?chat_id=@coin_scouter\")"
+      "Bash(curl -s \"https://api.telegram.org/bot7784266051:AAFKx4FDQ5aCUzsWsG5so_5ALLovmdnWX5M/getChat?chat_id=@coin_scouter\")",
+      "WebFetch(domain:docs.pacifica.fi)",
+      "WebFetch(domain:pacifica.gitbook.io)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(kill 40539)",
+      "Bash(kill 48650)",
+      "Bash(curl -s -w \"\\\\nHTTP_CODE:%{http_code}\" \"https://api.pacifica.fi/api/v1/trades?symbol=SOL\" -H \"PF-API-KEY: FqYgWgwALuxYE6be2Fpcoc75HUwAcRGYwPkcxqZ4c4Pi\")",
+      "Bash(curl -s -w \"\\\\nHTTP_CODE:%{http_code}\" \"https://api.pacifica.fi/api/v1/trades?symbol=SOL\")",
+      "Bash(kill 57787)",
+      "Bash(curl -s -w \"\\\\nHTTP_CODE:%{http_code}\" \"https://api.pacifica.fi/api/v1/account/update_leverage\" -X POST -H \"Content-Type: application/json\" -d '{}')",
+      "Bash(curl -s -w \"\\\\nHTTP_CODE:%{http_code}\" \"https://api.pacifica.fi/api/v1/account/leverage\" -X POST -H \"Content-Type: application/json\" -d '{}')",
+      "Bash(curl -s \"https://api.pacifica.fi/api/v1/info\")",
+      "Bash(curl -s \"https://api.pacifica.fi/api/v1/orders?account=test\")",
+      "Bash(grep -E \"\\\\.\\(ts|json\\)$\")",
+      "Bash(wc -l /Users/nakyutae/personal/git/telegram-bot/src/*/*.service.ts)"
     ],
     "additionalDirectories": [
       "/Users/nakyutae/personal/git/telegram-bot"
