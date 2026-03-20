@@ -269,7 +269,7 @@ export class GridTradingService {
     return failCount;
   }
 
-  @Cron(CronExpression.EVERY_SECOND)
+  @Cron(CronExpression.EVERY_5_SECONDS)
   async monitorOrders(): Promise<void> {
     if (!this.isRunning || !this.config) return;
 
