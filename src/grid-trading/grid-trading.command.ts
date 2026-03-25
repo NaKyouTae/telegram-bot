@@ -680,62 +680,39 @@ export class GridTradingCommand implements OnModuleInit {
         const curPrice = state.currentPrice;
         const minOrder = state.minOrderSize ?? 10;
         const bal = state.balanceNum ?? 0;
-        const allCounts = [3, 5, 10, 15, 20, 30];
 
-        // 잔고 기준 가능한 그리드만 필터 (최소 주문금액 * (그리드수+1) <= 잔고)
-        const availableCounts = allCounts.filter((c) => minOrder * (c + 1) <= bal);
+        // 잔고 기준 최대 가능한 그리드 수 계산
+        const maxGridByBalance = Math.floor(bal / minOrder) - 1;
+        const maxGrid = Math.min(Math.max(maxGridByBalance, 0), 50);
 
-        let gridInfo = '';
-        if (curPrice) {
-          gridInfo = '\n\n';
-          for (const c of allCounts) {
-            const interval = (upper - lower) / c;
-            let bidCount = 0;
-            let askCount = 0;
-            for (let i = 0; i <= c; i++) {
-              const price = lower + interval * i;
-              if (price < curPrice) bidCount++;
-              else askCount++;
-            }
-            const totalOrders = bidCount + askCount;
-            const minInvest = minOrder * (c + 1);
-            const available = minInvest <= bal;
-            const mark = available ? '✅' : '🚫';
-            gridInfo += `${mark} ${c}개: 간격 $${interval.toFixed(2)} / 매수 ${bidCount} 매도 ${askCount} (최소 $${minInvest})\n`;
-          }
-        }
-
-        const explanation = curPrice
-          ? `\n💡 그리드 N개 선택 → 범위를 N등분 → <b>N+1건</b> 주문 생성\n현재가($${curPrice.toLocaleString()}) 아래는 매수, 위는 매도\n📌 최소 주문금액: $${minOrder}`
-          : '';
-
-        if (availableCounts.length === 0) {
+        if (maxGrid < 2) {
           await ctx.reply(
-            `${this.balanceHeader(state)}❌ 잔고가 부족합니다.\n\n최소 투자금: $${minOrder * (allCounts[0] + 1)} (${allCounts[0]}개 그리드 = ${allCounts[0] + 1}건 주문)`,
+            `${this.balanceHeader(state)}❌ 잔고가 부족합니다.\n\n최소 투자금: $${minOrder * 3} (2개 그리드 = 3건 주문)`,
             { parse_mode: 'HTML' },
           );
           this.wizardStates.delete(userId);
           return;
         }
 
-        // 버튼을 3개씩 한 줄로 배치
-        const buttonRows: ReturnType<typeof Markup.button.callback>[][] = [];
-        let row: ReturnType<typeof Markup.button.callback>[] = [];
-        for (const c of availableCounts) {
-          row.push(Markup.button.callback(`${c}개`, `grid_count:${c}`));
-          if (row.length === 3) {
-            buttonRows.push(row);
-            row = [];
+        let gridInfo = '';
+        if (curPrice) {
+          const exampleCounts = [3, 5, 10, 20].filter((c) => c <= maxGrid);
+          if (exampleCounts.length > 0) {
+            gridInfo = '\n\n📊 <b>참고</b>\n';
+            for (const c of exampleCounts) {
+              const interval = (upper - lower) / c;
+              gridInfo += `${c}개: 간격 $${interval.toFixed(2)} (최소 $${minOrder * (c + 1)})\n`;
+            }
           }
         }
-        if (row.length > 0) buttonRows.push(row);
 
         await ctx.reply(
-          `${this.balanceHeader(state)}✅ 상한가: $${value}\n\n📏 <b>그리드 수</b>를 선택하세요:${gridInfo}${explanation}`,
-          {
-            parse_mode: 'HTML',
-            ...Markup.inlineKeyboard(buttonRows),
-          },
+          `${this.balanceHeader(state)}✅ 상한가: $${value}\n\n` +
+            `📏 <b>그리드 수</b>를 입력하세요 (2~${maxGrid}):` +
+            `${gridInfo}\n` +
+            `💡 그리드 N개 → 범위를 N등분 → <b>N+1건</b> 주문 생성\n` +
+            `📌 최소 주문금액: $${minOrder}`,
+          { parse_mode: 'HTML' },
         );
         break;
       }

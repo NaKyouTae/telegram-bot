@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Notice } from './entities/notice.entity';
 import { GridUser } from './entities/grid-user.entity';
+import { GridSession } from './entities/grid-session.entity';
 
 @Module({
   imports: [
@@ -10,7 +11,7 @@ import { GridUser } from './entities/grid-user.entity';
       useFactory: (configService: ConfigService) => ({
         type: 'postgres',
         url: configService.getOrThrow<string>('DATABASE_URL'),
-        entities: [Notice, GridUser],
+        entities: [Notice, GridUser, GridSession],
         synchronize: true,
         ssl:
           configService.get<string>('NODE_ENV') === 'production'
@@ -19,7 +20,7 @@ import { GridUser } from './entities/grid-user.entity';
       }),
       inject: [ConfigService],
     }),
-    TypeOrmModule.forFeature([Notice, GridUser]),
+    TypeOrmModule.forFeature([Notice, GridUser, GridSession]),
   ],
   exports: [TypeOrmModule],
 })

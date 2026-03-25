@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -7,6 +7,7 @@ import { PacificaClientFactory } from './pacifica-client.factory';
 import { PacificaClient } from './pacifica.client';
 import { TelegramService } from '../telegram/telegram.service';
 import { GridUser } from '../database/entities/grid-user.entity';
+import { GridSession } from '../database/entities/grid-session.entity';
 import { decrypt } from './crypto.util';
 
 function escapeHtml(text: string): string {
@@ -21,6 +22,7 @@ interface GridConfig {
   totalAmount: number;
   leverage: number;
   lotSize: number;
+  tickSize: number;
 }
 
 interface GridLevel {
@@ -38,7 +40,7 @@ interface UserGridSession {
 }
 
 @Injectable()
-export class GridTradingService {
+export class GridTradingService implements OnModuleInit {
   private readonly logger = new Logger(GridTradingService.name);
   private sessions = new Map<number, UserGridSession>();
 
@@ -48,7 +50,76 @@ export class GridTradingService {
     private configService: ConfigService,
     @InjectRepository(GridUser)
     private gridUserRepository: Repository<GridUser>,
+    @InjectRepository(GridSession)
+    private gridSessionRepository: Repository<GridSession>,
   ) {}
+
+  async onModuleInit(): Promise<void> {
+    await this.restoreSessions();
+  }
+
+  private async restoreSessions(): Promise<void> {
+    try {
+      const savedSessions = await this.gridSessionRepository.find();
+      for (const saved of savedSessions) {
+        const session: UserGridSession = {
+          config: {
+            symbol: saved.symbol,
+            lowerPrice: saved.lowerPrice,
+            upperPrice: saved.upperPrice,
+            gridCount: saved.gridCount,
+            totalAmount: saved.totalAmount,
+            leverage: saved.leverage,
+            lotSize: saved.lotSize,
+            tickSize: saved.tickSize ?? 1,
+          },
+          gridLevels: saved.gridLevels,
+          fillCount: saved.fillCount,
+          totalProfit: saved.totalProfit,
+        };
+        this.sessions.set(Number(saved.telegramId), session);
+        this.logger.log(`[User ${saved.telegramId}] Session restored: ${saved.symbol}`);
+      }
+      if (savedSessions.length > 0) {
+        this.logger.log(`Restored ${savedSessions.length} grid session(s) from DB`);
+      }
+    } catch (error) {
+      this.logger.error(`Failed to restore sessions: ${error.message}`);
+    }
+  }
+
+  private async saveSessionToDb(userId: number, session: UserGridSession): Promise<void> {
+    try {
+      let entity = await this.gridSessionRepository.findOne({
+        where: { telegramId: userId },
+      });
+      if (!entity) {
+        entity = this.gridSessionRepository.create({ telegramId: userId });
+      }
+      entity.symbol = session.config.symbol;
+      entity.lowerPrice = session.config.lowerPrice;
+      entity.upperPrice = session.config.upperPrice;
+      entity.gridCount = session.config.gridCount;
+      entity.totalAmount = session.config.totalAmount;
+      entity.leverage = session.config.leverage;
+      entity.lotSize = session.config.lotSize;
+      entity.tickSize = session.config.tickSize;
+      entity.gridLevels = session.gridLevels;
+      entity.fillCount = session.fillCount;
+      entity.totalProfit = session.totalProfit;
+      await this.gridSessionRepository.save(entity);
+    } catch (error) {
+      this.logger.error(`[User ${userId}] Failed to save session to DB: ${error.message}`);
+    }
+  }
+
+  private async deleteSessionFromDb(userId: number): Promise<void> {
+    try {
+      await this.gridSessionRepository.delete({ telegramId: userId });
+    } catch (error) {
+      this.logger.error(`[User ${userId}] Failed to delete session from DB: ${error.message}`);
+    }
+  }
 
   private getEncryptionKey(): string {
     return this.configService.getOrThrow<string>('GRID_ENCRYPTION_KEY');
@@ -176,21 +247,22 @@ export class GridTradingService {
       }
 
       const currentPrice = await client.getMarketPrice(symbol);
+      const tickSize = parseFloat(marketInfo.tick_size);
       const gridInterval = (upperPrice - lowerPrice) / gridCount;
       let bidCount = 0;
       let askCount = 0;
       for (let i = 0; i <= gridCount; i++) {
-        const price = lowerPrice + gridInterval * i;
+        const price = this.roundToTickSize(lowerPrice + gridInterval * i, tickSize);
         if (price < currentPrice) bidCount++;
         else askCount++;
       }
 
       let gridDetail = '';
       for (let i = 0; i <= gridCount; i++) {
-        const price = lowerPrice + gridInterval * i;
+        const price = this.roundToTickSize(lowerPrice + gridInterval * i, tickSize);
         const side = price < currentPrice ? '🟢 매수' : '🔴 매도';
         const marker = (price <= currentPrice && price + gridInterval > currentPrice) ? ' ◀ 현재가' : '';
-        gridDetail += `  $${price.toFixed(2)} ${side}${marker}\n`;
+        gridDetail += `  $${price} ${side}${marker}\n`;
       }
 
       return (
@@ -259,6 +331,7 @@ export class GridTradingService {
         return `❌ ${symbol} 마켓을 찾을 수 없습니다.`;
       }
       const lotSize = parseFloat(marketInfo.lot_size);
+      const tickSize = parseFloat(marketInfo.tick_size);
 
       const minOrderSize = parseFloat(marketInfo.min_order_size);
       const amountPerGrid = totalAmount / gridCount;
@@ -281,13 +354,13 @@ export class GridTradingService {
         );
       }
 
-      const config: GridConfig = { symbol, lowerPrice, upperPrice, gridCount, totalAmount, leverage, lotSize };
+      const config: GridConfig = { symbol, lowerPrice, upperPrice, gridCount, totalAmount, leverage, lotSize, tickSize };
 
       await client.updateLeverage(symbol, leverage);
       this.logger.log(`[User ${userId}] Leverage set to ${leverage}x for ${symbol}`);
 
       const currentPrice = await client.getMarketPrice(symbol);
-      const gridLevels = this.buildGridLevels(lowerPrice, upperPrice, gridCount, currentPrice);
+      const gridLevels = this.buildGridLevels(lowerPrice, upperPrice, gridCount, currentPrice, tickSize);
 
       const session: UserGridSession = {
         config,
@@ -302,6 +375,7 @@ export class GridTradingService {
       }
 
       this.sessions.set(userId, session);
+      await this.saveSessionToDb(userId, session);
 
       const gridInterval = (upperPrice - lowerPrice) / gridCount;
       const placedOrders = gridLevels.filter((l) => l.orderId !== null).length;
@@ -333,16 +407,21 @@ export class GridTradingService {
 
     try {
       const client = await this.getClientForUser(userId);
+      const openOrderCount = session.gridLevels.filter((l) => l.orderId !== null).length;
       const result = await client.cancelAllOrders(session.config.symbol);
+      this.logger.log(`[User ${userId}] cancelAllOrders response: ${JSON.stringify(result)}`);
+
+      const cancelledCount = result.cancelled_count ?? openOrderCount;
 
       const message =
         `🔴 <b>그리드 매매 중지</b>\n\n` +
         `종목: ${session.config.symbol}\n` +
-        `취소된 주문: ${result.cancelled_count}개\n` +
+        `취소된 주문: ${cancelledCount}개\n` +
         `총 체결 횟수: ${session.fillCount}회\n` +
         `예상 수익: $${session.totalProfit.toFixed(2)}`;
 
       this.sessions.delete(userId);
+      await this.deleteSessionFromDb(userId);
       this.pacificaClientFactory.removeClient(userId);
 
       return message;
@@ -384,28 +463,40 @@ export class GridTradingService {
     }
   }
 
+  private roundToTickSize(price: number, tickSize: number): number {
+    return Math.round(price / tickSize) * tickSize;
+  }
+
   private buildGridLevels(
     lowerPrice: number,
     upperPrice: number,
     gridCount: number,
     currentPrice: number,
+    tickSize: number = 1,
   ): GridLevel[] {
     const levels: GridLevel[] = [];
     const interval = (upperPrice - lowerPrice) / gridCount;
 
     for (let i = 0; i <= gridCount; i++) {
-      const price = lowerPrice + interval * i;
+      const rawPrice = lowerPrice + interval * i;
+      const price = this.roundToTickSize(rawPrice, tickSize);
       const side = price < currentPrice ? 'bid' : 'ask';
 
       levels.push({
-        price: parseFloat(price.toFixed(2)),
+        price,
         side,
         orderId: null,
         filled: false,
       });
     }
 
-    return levels;
+    // tick size 반올림으로 중복 가격 제거
+    const seen = new Set<number>();
+    return levels.filter((l) => {
+      if (seen.has(l.price)) return false;
+      seen.add(l.price);
+      return true;
+    });
   }
 
   private ceilToLotSize(amount: number, lotSize: number): string {
@@ -470,6 +561,10 @@ export class GridTradingService {
         const client = await this.getClientForUser(userId);
         const openOrders = await client.getOpenOrders();
         const openOrderIds = new Set(openOrders.map((o) => o.order_id));
+        const gridOrderIds = session.gridLevels.filter((l) => l.orderId).map((l) => l.orderId);
+        this.logger.debug(
+          `[User ${userId}] Grid orderIds: ${JSON.stringify(gridOrderIds)}, Open orderIds: ${JSON.stringify([...openOrderIds])}`,
+        );
         const gridInterval =
           (session.config.upperPrice - session.config.lowerPrice) /
           session.config.gridCount;
@@ -526,6 +621,8 @@ export class GridTradingService {
               `[User ${userId}] Order ${oldOrderId} filled: ${oldSide} @ $${level.price}. No adjacent level for flip.`,
             );
           }
+
+          await this.saveSessionToDb(userId, session);
 
           try {
             await this.telegramService.sendMessageTo(

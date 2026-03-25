@@ -139,7 +139,11 @@ export class PacificaClient {
         `${this.baseUrl}/orders?account=${this.account}`,
       ),
     );
-    return data.data ?? data;
+    const orders = data.data ?? data;
+    // open 상태인 주문만 필터링 (체결/취소된 주문 제외)
+    return Array.isArray(orders)
+      ? orders.filter((o: any) => o.status === 'open' || o.status === 'new')
+      : orders;
   }
 
   async createLimitOrder(params: OrderParams): Promise<{ order_id: number }> {
